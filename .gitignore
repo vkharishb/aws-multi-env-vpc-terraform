@@ -1,0 +1,27 @@
+# Local .terraform directories
+**/.terraform/*
+
+# Terraform state files (remote state is used - these should never be committed)
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Exclude all .tfvars files that may contain sensitive data
+# (this repo's tfvars only hold non-secret defaults, but keep the habit)
+*.tfvars.json
+
+# Terraform lock file - DO commit this one for reproducible providers
+!.terraform.lock.hcl
+
+# CLI config files
+.terraformrc
+terraform.rc
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
