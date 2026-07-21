@@ -15,17 +15,16 @@ permissions:
 jobs:
   resolve-context:
     name: Resolve Apply Context
+    runs-on: ubuntu-latest
 
-    # Apply only successful push/manual plans.
-    # Pull-request plans are review-only and must never apply.
+    # Dev: successful Plan triggered by push to devops.
+    # Prod: successful Plan triggered by PR targeting main.
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       (
         github.event.workflow_run.event == 'push' ||
-        github.event.workflow_run.event == 'workflow_dispatch'
+        github.event.workflow_run.event == 'pull_request'
       )
-
-    runs-on: ubuntu-latest
 
     outputs:
       target_environment: ${{ steps.context.outputs.target_environment }}
@@ -38,25 +37,33 @@ jobs:
         id: context
         shell: bash
         env:
+          PLAN_EVENT: ${{ github.event.workflow_run.event }}
           PLAN_BRANCH: ${{ github.event.workflow_run.head_branch }}
           PLAN_SHA: ${{ github.event.workflow_run.head_sha }}
+          PLAN_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
 
-          if [[ "${PLAN_BRANCH}" == "main" ]]; then
+          if [[ "${PLAN_EVENT}" == "pull_request" ]]; then
             TARGET_ENVIRONMENT="prod"
-          else
+            WORKING_DIRECTORY="terraform/env/prod"
+          elif [[ "${PLAN_EVENT}" == "push" && "${PLAN_BRANCH}" == "devops" ]]; then
             TARGET_ENVIRONMENT="dev"
+            WORKING_DIRECTORY="terraform/env/dev"
+          else
+            echo "::error::Unsupported Plan execution."
+            echo "::error::Event=${PLAN_EVENT}, branch=${PLAN_BRANCH}"
+            exit 1
           fi
 
-          WORKING_DIRECTORY="terraform/env/${TARGET_ENVIRONMENT}"
-          ARTIFACT_NAME="terraform-plan-${TARGET_ENVIRONMENT}"
+          ARTIFACT_NAME="terraform-plan-${TARGET_ENVIRONMENT}-${PLAN_RUN_ID}"
 
           echo "target_environment=${TARGET_ENVIRONMENT}" >> "${GITHUB_OUTPUT}"
           echo "working_directory=${WORKING_DIRECTORY}" >> "${GITHUB_OUTPUT}"
           echo "artifact_name=${ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
           echo "checkout_ref=${PLAN_SHA}" >> "${GITHUB_OUTPUT}"
 
+          echo "Plan event: ${PLAN_EVENT}"
           echo "Plan branch: ${PLAN_BRANCH}"
           echo "Plan commit: ${PLAN_SHA}"
           echo "Environment: ${TARGET_ENVIRONMENT}"
@@ -73,8 +80,6 @@ jobs:
       group: terraform-apply-${{ needs.resolve-context.outputs.target_environment }}
       cancel-in-progress: false
 
-    # dev can run without reviewers.
-    # Configure required reviewers for the prod environment.
     environment:
       name: ${{ needs.resolve-context.outputs.target_environment }}
 
@@ -121,7 +126,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Verify plan artifact
+      - name: Verify saved plan
         working-directory: ${{ env.TF_WORKING_DIR }}
         shell: bash
         env:
@@ -136,22 +141,29 @@ jobs:
 
           sha256sum -c tfplan.sha256
 
-          PLAN_ENVIRONMENT="$(grep '^environment=' tfplan.metadata | cut -d= -f2)"
-          PLAN_SHA="$(grep '^commit_sha=' tfplan.metadata | cut -d= -f2)"
+          PLAN_ENVIRONMENT="$(
+            grep '^environment=' tfplan.metadata |
+            cut -d= -f2
+          )"
+
+          PLAN_SHA="$(
+            grep '^commit_sha=' tfplan.metadata |
+            cut -d= -f2
+          )"
 
           if [[ "${PLAN_ENVIRONMENT}" != "${EXPECTED_ENVIRONMENT}" ]]; then
-            echo "::error::Plan environment mismatch."
-            echo "::error::Expected ${EXPECTED_ENVIRONMENT}, received ${PLAN_ENVIRONMENT}."
+            echo "::error::Environment mismatch."
+            echo "::error::Expected ${EXPECTED_ENVIRONMENT}; got ${PLAN_ENVIRONMENT}."
             exit 1
           fi
 
           if [[ "${PLAN_SHA}" != "${EXPECTED_SHA}" ]]; then
-            echo "::error::Plan commit mismatch."
-            echo "::error::Expected ${EXPECTED_SHA}, received ${PLAN_SHA}."
+            echo "::error::Commit mismatch."
+            echo "::error::Expected ${EXPECTED_SHA}; got ${PLAN_SHA}."
             exit 1
           fi
 
-          echo "Plan checksum, environment and commit verified."
+          echo "Saved plan verification passed."
 
       - name: Display saved Terraform Plan
         working-directory: ${{ env.TF_WORKING_DIR }}
