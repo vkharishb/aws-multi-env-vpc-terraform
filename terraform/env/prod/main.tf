@@ -82,6 +82,7 @@ module "asg" {
   source = "../../modules/asg"
 
   name                = local.name
+  aws_region          = var.aws_region
   instance_type       = var.instance_type
   app_sg_id           = module.security_groups.app_sg_id
   private_subnet_ids  = module.vpc.private_subnet_ids

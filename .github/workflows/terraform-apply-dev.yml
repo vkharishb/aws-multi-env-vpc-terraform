@@ -1,8 +1,8 @@
-name: Terraform Apply - Prod
+name: Terraform Apply - Dev
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
     paths:
       - "terraform/**"
   workflow_dispatch:
@@ -12,12 +12,12 @@ permissions:
   contents: read
 
 jobs:
-  apply-prod:
+  apply-dev:
     runs-on: ubuntu-latest
-    environment: prod
+    environment: dev # no protection rules - applies immediately, no manual gate
     defaults:
       run:
-        working-directory: terraform/env/prod
+        working-directory: terraform/environments/dev
 
     steps:
       - name: Checkout

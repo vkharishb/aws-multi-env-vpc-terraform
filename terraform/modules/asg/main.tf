@@ -82,6 +82,7 @@ resource "aws_launch_template" "this" {
 
   user_data = base64encode(templatefile("${path.module}/user_data.sh", {
     environment = var.name
+    aws_region  = var.aws_region
   }))
 
   tag_specifications {
@@ -113,7 +114,19 @@ resource "aws_autoscaling_group" "this" {
 
   launch_template {
     id      = aws_launch_template.this.id
-    version = "$Latest"
+    version = aws_launch_template.this.latest_version
+  }
+
+  # When the launch template changes (new AMI, new user_data, etc.) roll
+  # existing instances automatically instead of leaving them on the old
+  # version until they happen to be replaced some other way.
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 50
+      instance_warmup        = 60
+    }
+    triggers = ["launch_template"]
   }
 
   # Spread instances evenly across AZs for real HA, not just "multi-AZ on paper"

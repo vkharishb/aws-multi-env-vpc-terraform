@@ -2,9 +2,7 @@ name: Terraform Plan
 
 on:
   pull_request:
-    branches: 
-      - main
-      - dev
+    branches: [main]
     paths:
       - "terraform/**"
   workflow_dispatch: # lets you run this manually from the Actions tab, no PR needed

@@ -16,7 +16,8 @@ cat > /var/www/html/index.html <<HTML
 <html>
 <head><title>${environment} - Multi-Env VPC Demo</title></head>
 <body style="font-family: sans-serif; text-align: center; margin-top: 10%;">
-  <h1>Environment: ${environment}</h1>
+  <h1>AWS Region: ${aws_region}</h1>
+  <h2>Environment: ${environment}</h2>
   <p>Served by instance: $${INSTANCE_ID}</p>
   <p>Availability Zone: $${AZ}</p>
 </body>
