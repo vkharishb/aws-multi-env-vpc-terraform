@@ -1,23 +1,38 @@
-name: Terraform Apply - Prod
+name: Terraform Apply
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "terraform/**"
+  workflow_run:
+    workflows: ["Terraform Plan"]
+    types:
+      - completed
+    branches:
+      - main
+  
   workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: terraform-apply-dev
+  cancel-in-progress: false
+
 jobs:
-  apply-prod:
+  apply-dev:
+    name: Apply Terraform
+    
+    # workflow_run triggers even when Terraform Plan fails.
+    # Manual execution is also allowed.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    environment: prod
+    environment:
+      name: dev # no protection rules - applies immediately, no manual gate
     defaults:
       run:
-        working-directory: terraform/env/prod
+        working-directory: terraform/env/dev
 
     steps:
       - name: Checkout

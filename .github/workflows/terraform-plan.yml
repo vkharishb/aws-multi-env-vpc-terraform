@@ -3,6 +3,8 @@ name: Terraform Plan
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [devops]
     paths:
       - "terraform/**"
   workflow_dispatch: # lets you run this manually from the Actions tab, no PR needed
@@ -22,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: terraform/environments/${{ matrix.environment }}
+        working-directory: terraform/env/${{ matrix.environment }}
 
     steps:
       - name: Checkout
