@@ -86,7 +86,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ap-south-1
           role-skip-session-tagging: true
-          role-session-name: terraform-plan-${{ steps.context.outputs.target_environment }}-${{ github.run_id }}
+          #role-session-name: terraform-plan-${{ steps.context.outputs.target_environment }}-${{ github.run_id }}
           
 
       - name: Verify AWS identity
