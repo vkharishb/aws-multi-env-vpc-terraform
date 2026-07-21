@@ -1,0 +1,170 @@
+name: Terraform Plan
+
+on:
+  push:
+    branches:
+      - devops
+    paths:
+      - "terraform/**"
+      - ".github/workflows/**"
+
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - "terraform/**"
+      - ".github/workflows/**"
+      
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    env:
+      TF_IN_AUTOMATION: true
+      TF_INPUT: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Terraform environment
+        id: context
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            if [[ "${BASE_REF}" != "main" ]]; then
+              echo "::error::Production Plan requires a PR targeting main."
+              exit 1
+            fi
+
+            TARGET_ENVIRONMENT="prod"
+            WORKING_DIRECTORY="terraform/env/prod"
+            EFFECTIVE_BRANCH="main"
+          elif [[ "${EVENT_NAME}" == "push" && "${REF_NAME}" == "devops" ]]; then
+            TARGET_ENVIRONMENT="dev"
+            WORKING_DIRECTORY="terraform/env/dev"
+            EFFECTIVE_BRANCH="devops"
+          else
+            echo "::error::Unsupported event or branch."
+            echo "::error::Event=${EVENT_NAME}, ref=${REF_NAME}, base=${BASE_REF}"
+            exit 1
+          fi
+
+          ARTIFACT_NAME="terraform-plan-${TARGET_ENVIRONMENT}-${GITHUB_RUN_ID}"
+
+          echo "target_environment=${TARGET_ENVIRONMENT}" >> "${GITHUB_OUTPUT}"
+          echo "working_directory=${WORKING_DIRECTORY}" >> "${GITHUB_OUTPUT}"
+          echo "effective_branch=${EFFECTIVE_BRANCH}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=${ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
+
+          echo "Event: ${EVENT_NAME}"
+          echo "Environment: ${TARGET_ENVIRONMENT}"
+          echo "Directory: ${WORKING_DIRECTORY}"
+          echo "Artifact: ${ARTIFACT_NAME}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ap-south-1
+          role-session-name: terraform-plan-${{ steps.context.outputs.target_environment }}-${{ github.run_id }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform Init
+        working-directory: ${{ steps.context.outputs.working_directory }}
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure
+
+      - name: Terraform Validate
+        working-directory: ${{ steps.context.outputs.working_directory }}
+        run: terraform validate
+
+      - name: Create saved Terraform Plan
+        working-directory: ${{ steps.context.outputs.working_directory }}
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -lock-timeout=5m \
+            -out=tfplan
+
+      - name: Display Terraform Plan
+        working-directory: ${{ steps.context.outputs.working_directory }}
+        run: terraform show -no-color tfplan
+
+      - name: Create plan checksum and metadata
+        working-directory: ${{ steps.context.outputs.working_directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha256sum tfplan > tfplan.sha256
+
+          {
+            echo "environment=${{ steps.context.outputs.target_environment }}"
+            echo "event=${GITHUB_EVENT_NAME}"
+            echo "branch=${{ steps.context.outputs.effective_branch }}"
+            echo "commit_sha=${GITHUB_SHA}"
+            echo "plan_run_id=${GITHUB_RUN_ID}"
+          } > tfplan.metadata
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.context.outputs.artifact_name }}
+          path: |
+            ${{ steps.context.outputs.working_directory }}/tfplan
+            ${{ steps.context.outputs.working_directory }}/tfplan.sha256
+            ${{ steps.context.outputs.working_directory }}/tfplan.metadata
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Add workflow summary
+        shell: bash
+        run: |
+          {
+            echo "## Terraform Plan"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Event | \`${GITHUB_EVENT_NAME}\` |"
+            echo "| Environment | \`${{ steps.context.outputs.target_environment }}\` |"
+            echo "| Directory | \`${{ steps.context.outputs.working_directory }}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Artifact | \`${{ steps.context.outputs.artifact_name }}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"

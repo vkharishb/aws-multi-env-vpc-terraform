@@ -14,8 +14,9 @@ variable "instance_type" {
 }
 
 variable "root_volume_size" {
-  type    = number
-  default = 20
+  description = "Root EBS volume size in GB. Must be >= the AMI's snapshot size (Amazon Linux 2023 currently requires >= 30GB) or the ASG will fail to launch instances."
+  type        = number
+  default     = 30
 }
 
 variable "app_sg_id" {
