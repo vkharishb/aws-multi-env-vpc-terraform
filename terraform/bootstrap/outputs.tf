@@ -11,3 +11,8 @@ output "lock_table_name" {
 output "aws_region" {
   value = var.aws_region
 }
+
+output "github_actions_role_arn" {
+  description = "Paste this into the GitHub repo secret AWS_OIDC_ROLE_ARN"
+  value       = aws_iam_role.github_actions.arn
+}
