@@ -21,6 +21,13 @@ data "aws_ami" "amazon_linux_2023" {
   }
 }
 
+// Region used for templating/user-data if needed. Declared here to fix
+// reference to var.aws_region from this module.
+variable "aws_region" {
+  description = "AWS region where resources are deployed"
+  type        = string
+}
+
 # ---------------------------------------------------------------------------
 # IAM role - SSM only. No SSH keypair is created or referenced anywhere.
 # ---------------------------------------------------------------------------
@@ -120,14 +127,14 @@ resource "aws_autoscaling_group" "this" {
   # When the launch template changes (new AMI, new user_data, etc.) roll
   # existing instances automatically instead of leaving them on the old
   # version until they happen to be replaced some other way.
-  instance_refresh {
-    strategy = "Rolling"
-    preferences {
-      min_healthy_percentage = 50
-      instance_warmup        = 60
-    }
-    triggers = ["launch_template"]
+instance_refresh {
+  strategy = "Rolling"
+
+  preferences {
+    min_healthy_percentage = 50
+    instance_warmup        = 300
   }
+}
 
   # Spread instances evenly across AZs for real HA, not just "multi-AZ on paper"
   availability_zone_distribution {

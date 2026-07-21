@@ -2,11 +2,6 @@ variable "name" {
   type = string
 }
 
-variable "aws_region" {
-  description = "AWS region - passed into the instance so the sample app can display it"
-  type        = string
-}
-
 variable "ami_id" {
   description = "Custom AMI ID. Leave empty (\"\") to auto-select the latest Amazon Linux 2023 AMI."
   type        = string
