@@ -8,9 +8,9 @@ private_subnet_cidrs = ["10.1.10.0/24", "10.1.11.0/24", "10.1.12.0/24"]
 
 nat_mode = "per_az" # HA - no single point of failure
 
-instance_type         = "t3.small"
-asg_min_size           = 3
-asg_max_size           = 6
-asg_desired_capacity   = 3
+instance_type        = "t3.small"
+asg_min_size         = 3
+asg_max_size         = 6
+asg_desired_capacity = 3
 
 certificate_arn = "" # set your ACM cert ARN here to enable HTTPS

@@ -73,7 +73,7 @@ resource "aws_launch_template" "this" {
   vpc_security_group_ids = [var.app_sg_id]
 
   metadata_options {
-    http_tokens                = "required" # IMDSv2 enforced - blocks SSRF-style credential theft
+    http_tokens                 = "required" # IMDSv2 enforced - blocks SSRF-style credential theft
     http_put_response_hop_limit = 2
   }
 
@@ -81,9 +81,9 @@ resource "aws_launch_template" "this" {
     device_name = "/dev/xvda"
     ebs {
       volume_size           = var.root_volume_size
-      volume_type            = "gp3"
-      encrypted              = true
-      delete_on_termination  = true
+      volume_type           = "gp3"
+      encrypted             = true
+      delete_on_termination = true
     }
   }
 
@@ -127,14 +127,14 @@ resource "aws_autoscaling_group" "this" {
   # When the launch template changes (new AMI, new user_data, etc.) roll
   # existing instances automatically instead of leaving them on the old
   # version until they happen to be replaced some other way.
-instance_refresh {
-  strategy = "Rolling"
+  instance_refresh {
+    strategy = "Rolling"
 
-  preferences {
-    min_healthy_percentage = 50
-    instance_warmup        = 300
+    preferences {
+      min_healthy_percentage = 50
+      instance_warmup        = 300
+    }
   }
-}
 
   # Spread instances evenly across AZs for real HA, not just "multi-AZ on paper"
   availability_zone_distribution {
