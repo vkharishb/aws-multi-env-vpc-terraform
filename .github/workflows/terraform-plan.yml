@@ -1,101 +1,183 @@
-name: Terraform Plan
+name: Terraform Apply
 
 on:
-  push:
-    branches: [devops]
-    paths:
-      - "terraform/**"
-      - ".github/workflows/terraform-*.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - ".github/workflows/terraform-*.yml"
-  
-  workflow_dispatch: # lets you run this manually from the Actions tab, no PR needed
+  workflow_run:
+    workflows:
+      - Terraform Plan
+    types:
+      - completed
+    branches:
+      - main
+      - devops
 
-# Required for OIDC (id-token: write) and posting PR comments (pull-requests: write)
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Select environment to apply"
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+          - prod
+
 permissions:
   id-token: write
   contents: read
-  pull-requests: write
 
 jobs:
-  plan:
-    strategy:
-      fail-fast: false
-      matrix:
-        environment: [dev, prod]
+  resolve-context:
+    name: Resolve Terraform Environment
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: terraform/env/${{ matrix.environment }}
+
+    # workflow_run also triggers when Terraform Plan fails.
+    # Continue only for successful Plan runs or manual runs.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    outputs:
+      target_environment: ${{ steps.resolve.outputs.target_environment }}
+      working_directory: ${{ steps.resolve.outputs.working_directory }}
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
 
     steps:
-      - name: Checkout
+      - name: Resolve branch and environment
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLAN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          PLAN_SHA: ${{ github.event.workflow_run.head_sha }}
+          SELECTED_ENVIRONMENT: ${{ inputs.target_environment }}
+          MANUAL_BRANCH: ${{ github.ref_name }}
+          MANUAL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            case "${PLAN_BRANCH}" in
+              devops)
+                TARGET_ENVIRONMENT="dev"
+                WORKING_DIRECTORY="terraform/env/dev"
+                CHECKOUT_REF="${PLAN_SHA}"
+                ;;
+              main)
+                TARGET_ENVIRONMENT="prod"
+                WORKING_DIRECTORY="terraform/env/prod"
+                CHECKOUT_REF="${PLAN_SHA}"
+                ;;
+              *)
+                echo "::error::Unsupported triggering branch: ${PLAN_BRANCH}"
+                exit 1
+                ;;
+            esac
+          else
+            TARGET_ENVIRONMENT="${SELECTED_ENVIRONMENT}"
+            CHECKOUT_REF="${MANUAL_SHA}"
+
+            case "${TARGET_ENVIRONMENT}" in
+              dev)
+                if [[ "${MANUAL_BRANCH}" != "devops" ]]; then
+                  echo "::error::Manual Dev apply must run from the devops branch."
+                  echo "::error::Current branch: ${MANUAL_BRANCH}"
+                  exit 1
+                fi
+
+                WORKING_DIRECTORY="terraform/env/dev"
+                ;;
+              prod)
+                if [[ "${MANUAL_BRANCH}" != "main" ]]; then
+                  echo "::error::Manual Prod apply must run from the main branch."
+                  echo "::error::Current branch: ${MANUAL_BRANCH}"
+                  exit 1
+                fi
+
+                WORKING_DIRECTORY="terraform/env/prod"
+                ;;
+              *)
+                echo "::error::Invalid environment: ${TARGET_ENVIRONMENT}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          echo "target_environment=${TARGET_ENVIRONMENT}" >> "${GITHUB_OUTPUT}"
+          echo "working_directory=${WORKING_DIRECTORY}" >> "${GITHUB_OUTPUT}"
+          echo "checkout_ref=${CHECKOUT_REF}" >> "${GITHUB_OUTPUT}"
+
+          echo "Environment: ${TARGET_ENVIRONMENT}"
+          echo "Working directory: ${WORKING_DIRECTORY}"
+          echo "Checkout reference: ${CHECKOUT_REF}"
+
+  terraform-apply:
+    name: Apply Terraform - ${{ needs.resolve-context.outputs.target_environment }}
+    needs:
+      - resolve-context
+
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: terraform-apply-${{ needs.resolve-context.outputs.target_environment }}
+      cancel-in-progress: false
+
+    environment:
+      name: ${{ needs.resolve-context.outputs.target_environment }}
+
+    env:
+      TF_IN_AUTOMATION: true
+      TF_INPUT: false
+      TF_WORKING_DIR: ${{ needs.resolve-context.outputs.working_directory }}
+
+    steps:
+      - name: Checkout triggering commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-context.outputs.checkout_ref }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
+          terraform_wrapper: false
 
-      - name: DEBUG - print OIDC token claims (remove after diagnosing)
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const token = await core.getIDToken('sts.amazonaws.com');
-            const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-            console.log('sub:', payload.sub);
-            console.log('aud:', payload.aud);
-            console.log('iss:', payload.iss);
-            console.log('repository:', payload.repository);
-            console.log('repository_owner:', payload.repository_owner);
-
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ap-south-1
+          role-session-name: terraform-apply-${{ needs.resolve-context.outputs.target_environment }}-${{ github.run_id }}
 
-      - name: Format check
-        run: terraform fmt -check -recursive
-        working-directory: terraform
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
 
-      - name: Init
-        run: terraform init -input=false
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure
 
-      - name: Validate
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform validate
 
-      - name: Plan
-        id: plan
-        run: terraform plan -input=false -no-color
-        continue-on-error: true
+      - name: Create Terraform Plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -input=false \
+            -lock-timeout=5m \
+            -out=tfplan
 
-      - name: Comment plan on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const output = `#### Terraform Plan — \`${{ matrix.environment }}\`
-            <details><summary>Show plan</summary>
+      - name: Display Terraform Plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform show -no-color tfplan
 
-            \`\`\`terraform
-            ${{ steps.plan.outputs.stdout }}
-            \`\`\`
-
-            </details>
-
-            *Triggered by @${{ github.actor }} on \`${{ github.event.pull_request.head.sha }}\`*`;
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: output
-            });
-
-      - name: Fail if plan failed
-        if: steps.plan.outcome == 'failure'
-        run: exit 1
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            tfplan
