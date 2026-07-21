@@ -1,12 +1,17 @@
 name: Terraform Plan
 
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: [devops]
     paths:
       - "terraform/**"
+      - ".github/workflows/terraform-*.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-*.yml"
+  
   workflow_dispatch: # lets you run this manually from the Actions tab, no PR needed
 
 # Required for OIDC (id-token: write) and posting PR comments (pull-requests: write)
