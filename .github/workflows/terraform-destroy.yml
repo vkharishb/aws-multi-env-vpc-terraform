@@ -1,41 +1,147 @@
-name: Terraform Apply - Prod
+name: Terraform Destroy
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "terraform/**"
   workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Select the environment to destroy"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+
+      confirm_destroy:
+        description: "Type DESTROY-DEV or DESTROY-PROD"
+        required: true
+        type: string
 
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: terraform-destroy-${{ inputs.target_environment }}
+  cancel-in-progress: false
+
 jobs:
-  apply-prod:
+  terraform-destroy:
+    name: Destroy Terraform - ${{ inputs.target_environment }}
     runs-on: ubuntu-latest
-    environment: prod
-    defaults:
-      run:
-        working-directory: terraform/env/prod
+
+    environment:
+      name: ${{ inputs.target_environment }}
 
     steps:
-      - name: Checkout
+      - name: Checkout main branch
         uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Validate branch and confirmation
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+          CONFIRM_DESTROY: ${{ inputs.confirm_destroy }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Terraform destroy can only run from the main branch."
+            exit 1
+          fi
+
+          EXPECTED_CONFIRMATION="DESTROY-${TARGET_ENVIRONMENT^^}"
+
+          if [[ "${CONFIRM_DESTROY}" != "${EXPECTED_CONFIRMATION}" ]]; then
+            echo "::error::Invalid confirmation."
+            echo "::error::Type ${EXPECTED_CONFIRMATION} to destroy ${TARGET_ENVIRONMENT}."
+            exit 1
+          fi
+
+          echo "Destroy confirmation accepted for ${TARGET_ENVIRONMENT}."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
+          terraform_wrapper: false
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ap-south-1
+          role-session-name: terraform-destroy-${{ inputs.target_environment }}-${{ github.run_id }}
 
-      - name: Init
-        run: terraform init -input=false
+      # ------------------------------------------------------------
+      # Stage 1: Destroy selected environment infrastructure
+      # ------------------------------------------------------------
 
-      - name: Apply
-        run: terraform apply -input=false -auto-approve
+      - name: Initialize ${{ inputs.target_environment }} infrastructure
+        working-directory: terraform/envs/${{ inputs.target_environment }}
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure
+
+      - name: Validate ${{ inputs.target_environment }} infrastructure
+        working-directory: terraform/envs/${{ inputs.target_environment }}
+        run: terraform validate
+
+      - name: Create ${{ inputs.target_environment }} destroy plan
+        working-directory: terraform/envs/${{ inputs.target_environment }}
+        run: |
+          terraform plan \
+            -destroy \
+            -input=false \
+            -lock-timeout=5m \
+            -out=destroy-infra.tfplan
+
+      - name: Display ${{ inputs.target_environment }} destroy plan
+        working-directory: terraform/envs/${{ inputs.target_environment }}
+        run: terraform show -no-color destroy-infra.tfplan
+
+      - name: Destroy ${{ inputs.target_environment }} infrastructure
+        working-directory: terraform/envs/${{ inputs.target_environment }}
+        run: |
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            destroy-infra.tfplan
+
+      # ------------------------------------------------------------
+      # Stage 2: Destroy bootstrap only after infrastructure succeeds
+      # ------------------------------------------------------------
+
+      - name: Initialize bootstrap infrastructure
+        working-directory: ./terraform/bootstrap
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure
+
+      - name: Validate bootstrap infrastructure
+        working-directory: ./terraform/bootstrap
+        run: terraform validate
+
+      - name: Create bootstrap destroy plan
+        working-directory: ./terraform/bootstrap
+        run: |
+          terraform plan \
+            -destroy \
+            -input=false \
+            -lock-timeout=5m \
+            -out=destroy-bootstrap.tfplan
+
+      - name: Display bootstrap destroy plan
+        working-directory: ./terraform/bootstrap
+        run: terraform show -no-color destroy-bootstrap.tfplan
+
+      - name: Destroy bootstrap infrastructure
+        working-directory: ./terraform/bootstrap
+        run: |
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            destroy-bootstrap.tfplan
