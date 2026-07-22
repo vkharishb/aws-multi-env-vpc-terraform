@@ -1,0 +1,257 @@
+name: Terraform Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Select the Terraform bootstrap operation"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+
+      aws_region:
+        description: "AWS region for bootstrap resources"
+        required: true
+        type: string
+        default: "ap-south-1"
+
+      state_bucket_name:
+        description: "Globally unique S3 bucket for Terraform state"
+        required: true
+        type: string
+        default: "harish-tfstate-multienv-vpc"
+
+      lock_table_name:
+        description: "DynamoDB table for Terraform state locking"
+        required: true
+        type: string
+        default: "terraform-locks"
+
+      create_oidc_provider:
+        description: "Select true only when the AWS OIDC provider does not exist"
+        required: true
+        type: choice
+        default: "false"
+        options:
+          - "false"
+          - "true"
+
+      confirm_apply:
+        description: "For apply, type APPLY_BOOTSTRAP"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-bootstrap
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  TF_WORKING_DIR: terraform/bootstrap
+
+  AWS_REGION: ${{ inputs.aws_region }}
+  AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+
+  TF_VAR_aws_region: ${{ inputs.aws_region }}
+  TF_VAR_state_bucket_name: ${{ inputs.state_bucket_name }}
+  TF_VAR_lock_table_name: ${{ inputs.lock_table_name }}
+  TF_VAR_github_repo: ${{ github.repository }}
+  TF_VAR_create_oidc_provider: ${{ inputs.create_oidc_provider }}
+
+jobs:
+  terraform-bootstrap:
+    name: Bootstrap AWS Terraform Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate apply confirmation
+        if: ${{ inputs.operation == 'apply' }}
+        shell: bash
+        env:
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${CONFIRM_APPLY}" != "APPLY_BOOTSTRAP" ]]; then
+            echo "::error::For an apply operation, confirm_apply must be APPLY_BOOTSTRAP."
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      # Bootstrap cannot use the GitHub OIDC role because this Terraform
+      # configuration is responsible for creating or repairing that role.
+      #
+      # Use temporary bootstrap credentials and remove them after OIDC works.
+      - name: Configure temporary AWS bootstrap credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_BOOTSTRAP_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_BOOTSTRAP_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_BOOTSTRAP_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Verify AWS identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
+
+      - name: Terraform format check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -diff
+
+      - name: Detect existing bootstrap state
+        id: backend
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ inputs.state_bucket_name }}
+          STATE_KEY: bootstrap/terraform.tfstate
+        run: |
+          set -euo pipefail
+
+          rm -f github_actions_backend.tf
+
+          if aws s3api head-object \
+            --bucket "${STATE_BUCKET}" \
+            --key "${STATE_KEY}" >/dev/null 2>&1; then
+
+            echo "mode=remote" >> "${GITHUB_OUTPUT}"
+            echo "Existing bootstrap state found in S3."
+
+            cat > github_actions_backend.tf <<'EOF'
+          terraform {
+            backend "s3" {}
+          }
+          EOF
+          else
+            echo "mode=local" >> "${GITHUB_OUTPUT}"
+            echo "No existing bootstrap state was found."
+            echo "Terraform will start with local state."
+          fi
+
+      - name: Terraform init with existing remote state
+        if: ${{ steps.backend.outputs.mode == 'remote' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ inputs.state_bucket_name }}
+          LOCK_TABLE: ${{ inputs.lock_table_name }}
+        run: |
+          set -euo pipefail
+
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=${STATE_BUCKET}" \
+            -backend-config="key=bootstrap/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${LOCK_TABLE}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform init for first bootstrap
+        if: ${{ steps.backend.outputs.mode == 'local' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -input=false \
+            -backend=false
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -lock-timeout=5m \
+            -out=bootstrap.tfplan
+
+      - name: Display Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform show -no-color bootstrap.tfplan
+
+      - name: Terraform apply
+        if: ${{ inputs.operation == 'apply' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            bootstrap.tfplan
+
+      # The bootstrap module initially uses local state. After the first
+      # successful apply, migrate that state into the newly created S3 bucket.
+      - name: Migrate bootstrap state to S3
+        if: >-
+          ${{ inputs.operation == 'apply' &&
+              steps.backend.outputs.mode == 'local' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ inputs.state_bucket_name }}
+          LOCK_TABLE: ${{ inputs.lock_table_name }}
+        run: |
+          set -euo pipefail
+
+          cat > github_actions_backend.tf <<'EOF'
+          terraform {
+            backend "s3" {}
+          }
+          EOF
+
+          terraform init \
+            -input=false \
+            -migrate-state \
+            -force-copy \
+            -backend-config="bucket=${STATE_BUCKET}" \
+            -backend-config="key=bootstrap/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${LOCK_TABLE}" \
+            -backend-config="encrypt=true"
+
+          echo "Bootstrap state migrated to:"
+          echo "s3://${STATE_BUCKET}/bootstrap/terraform.tfstate"
+
+      - name: Display bootstrap outputs
+        if: ${{ inputs.operation == 'apply' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform output
+
+      - name: Add workflow summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Terraform Bootstrap"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Operation | \`${{ inputs.operation }}\` |"
+            echo "| Branch | \`${GITHUB_REF_NAME}\` |"
+            echo "| AWS region | \`${{ inputs.aws_region }}\` |"
+            echo "| State bucket | \`${{ inputs.state_bucket_name }}\` |"
+            echo "| Lock table | \`${{ inputs.lock_table_name }}\` |"
+            echo "| Create OIDC provider | \`${{ inputs.create_oidc_provider }}\` |"
+            echo "| Initial backend mode | \`${{ steps.backend.outputs.mode }}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
